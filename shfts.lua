@@ -9,18 +9,31 @@
 -- key3: start/stop voice 2
 -- 
 -- Midi device/channel output can be set per voice in params
+-- Crow support - clock in on input 2
+-- gate/pitch out on cv pairs 1/2, 3/4
 -- 
 -- GRID UI
--- 2 completely symmetrical voices, 8 columns each
+-- 2 identical voices, 8 columns each
 -- row 1 - pitch register bit display
 -- row 2 - trigger register bit display
--- row 3 - loop length (per voice)
--- row 4 - clock division (per voice)
--- row 5 - pitch change prob (first 4) pitch octave range (last 4)
--- row 6 - trigger change prob (first 4) trigger bias (last 4)
+-- row 3 - clock division
+-- row 4 - trigger bias (more triggers to the right)
+-- row 5 - pitch rate of change (more change to the right)
+-- row 6 - trigger rate of change (more change to the right)
 -- row 7 - quantizer presets - hold a button and press keys from row 1-6; 
 -- layout is perfect fourths vertical, chromatic scale horizontal
--- row 8 - kind of a mess right now, will have start/stop, write/shift manual controls (i think)
+-- a nice pentatonic scale:
+--    0 X 0 0 0 0 0 0
+--    0 X 0 0 X 0 0 0
+--    0 X 0 0 0 X 0 0
+-- row 8 :
+-- -- col 1: 1 start/stop clock
+-- -- col 2: single-step register 
+-- -- col 3: reduce loop length
+-- -- col 4: increase loop length
+-- -- col 5-8: pitch range (1-4 octaves)
+-- all controls repeated on columns 9-16 for voice 2
+-- this should work with a 8x8 grid I think?
 
 beatclock = require 'beatclock'
 
@@ -43,6 +56,11 @@ local clk = beatclock.new()
 clk.ticks_per_step = 1
 clk.steps_per_beat = 24
 clk:bpm_change(bpm)
+-- local clk_midi = midi.connect(1)
+-- clk_midi.event = function(data)
+--   print("clock got midi " .. dump(data))
+--   clk:process_midi(data)
+-- end
 
 local midi_chan = {
   {1,6,nil},
@@ -62,7 +80,19 @@ end
 function midi_setup()
   for ch = 1,#midi_chan do
     midi_chan[ch][3] = midi.connect(midi_chan[ch][1])
-    midi_chan[ch][3].event = function(data) 
+    if ch == 1 then
+      -- print("enabling midi clock on channel " .. ch)
+      midi_chan[ch][3].event = function(data) 
+        -- print("processing midi clock")
+        clk:process_midi(data)
+      end
+    else 
+      -- print("disabling midi clock on channel " .. ch)
+      if midi_chan[ch][1] ~= midi_chan[1][1] then
+        midi_chan[ch][3].event = function(data) 
+          -- print("ignoring midi clock")
+        end
+      end
     end
   end
   midi_panic()
@@ -106,8 +136,54 @@ local note_duration_stacks = {
   {}
 }
 
-local pulse_off_1 = metro.init()
-local pulse_off_2 = metro.init()
+local pulse_off = {
+  metro.init(),
+  metro.init()
+}
+
+pulse_off[1].count = 1
+pulse_off[2].count = 1
+
+pulse_off[1].event = function() 
+  local now = util.time()
+  print("pulse off 1 fired at " .. now)
+  if #note_duration_stacks[1] > 0 then 
+    local expired_note = note_duration_stacks[1][1][1]
+    print("note off: " .. expired_note)
+    local chan = midi_chan[1]
+    chan[3]:note_off(expired_note,1,chan[2])
+    table.remove(note_duration_stacks[1],1)
+  end
+  if #note_duration_stacks[1] > 0 then 
+    local nxt = note_duration_stacks[1][1][2]
+    local expires = nxt - now
+    print("next note: " .. note_duration_stacks[1][1][1] .. " in " .. expires .. " now: " .. now .. " next: " .. (nxt - now))
+    pulse_off[1].time = nxt - now
+    pulse_off[1]:start()
+  end
+end
+
+pulse_off[2].event = function() 
+  local now = util.time()
+  print("pulse off 2 fired at " .. now)
+  if #note_duration_stacks[2] > 0 then
+    local expired_note = note_duration_stacks[2][1][1]
+    print("note off: " .. expired_note)
+    local chan = midi_chan[2]
+    chan[3]:note_off(expired_note,1,chan[2])
+    table.remove(note_duration_stacks[2],1)
+  end
+  if #note_duration_stacks[2] > 0 then 
+    local next = note_duration_stacks[2][1][2]
+    local expires = next - now
+    print("next note: " .. note_duration_stacks[2][1][1] .. " in " .. expires)
+    pulse_off[2].time = next - now
+    pulse_off[2]:start()
+  end
+end
+
+local note_dur_1_ms = 0
+local note_dur_2_ms = 0
 
 local note_duration_1 = 16
 local note_duration_2 = 16
@@ -124,51 +200,129 @@ pulse_on.time = 0.1
 
 local ch1_tog = false
 local ch2_tog = false
+local ch1_trig = false
+local ch2_trig = false
 
 local b1_held = false
 
-local quant_channels = 1
-
-function on_pulse()
-  if (r1_rate ~= 0 and tick % r1_rate == 0) and ch1_tog then
-    r11 = shift(r11,r1_len, r1_prob_p)
-    r12 = shift(r12,r1_len, r1_prob_t)
-    redraw()
-    grid_draw()
-    if quant_channels == 1 then
-      step(r11,r12, 1,r1_bias_p,r1_bias_t, r1_offset_p,r1_pitch_range,note_duration_1,base_velocity_1,random_velocity_1, quant_tab)
-    else
-      step(r11,r12, 1,r1_bias_p,r1_bias_t, r1_offset_p,r1_pitch_range,note_duration_1,base_velocity_1,random_velocity_1, quant_tab_1)
-    end
+function make_quant_tab(state, lower_bound, upper_bound)
+  held_notes = {}
+  for i=0,11 do
+    held_notes[i] = 0
   end
-  if (r2_rate ~= 0 and tick % r2_rate == 0) and ch2_tog then
-    r21 = shift(r21,r2_len, r2_prob_p)
-    r22 = shift(r22,r2_len, r2_prob_t)
-    redraw()
-    grid_draw()
-    if quant_channels == 1 then
-      step(r21,r22, 2, r2_bias_p,r2_bias_t, r2_offset_p,r2_pitch_range,note_duration_2,base_velocity_2,random_velocity_2, quant_tab)
-    else
-      step(r21,r22, 2, r2_bias_p,r2_bias_t, r2_offset_p,r2_pitch_range,note_duration_2,base_velocity_2,random_velocity_2, quant_tab_2)
-    end
-  end
-  tick = tick + 1
-  for i = 1,#note_duration_stacks do 
-    -- iterate back to front
-    for j = #note_duration_stacks[i],1,-1 do
-      local expiration = note_duration_stacks[i][j][2]
-      if expiration <= tick then
-        local expired_note = note_duration_stacks[i][j][1]
-        local chan = midi_chan[i]
-        chan[3]:note_off(expired_note,1,chan[2])
-        table.remove(note_duration_stacks[i],j)
-      else 
-        break
+  for x=lower_bound,upper_bound do
+    for y = 1,6 do
+      local v = (5 * (7 - y) + x) % 12
+      if state[x][y] > 0 then 
+        held_notes[v] = 1 
       end
     end
   end
+  print("held_notes " .. dump(held_notes))
+  local qt = {}
+  for i = 0,11 do
+    local delta = 0
+    for j = 0,11 do
+      if held_notes[(i - j) % 12] > 0 then
+        delta = j * -1
+        break
+      elseif held_notes[(i + j) % 12] > 0 then
+        delta = j
+        break
+      end
+    end
+    qt[i] = delta
+  end
+  print("quant_tab" .. dump(qt))
+  return qt
 end
+
+local quant_channels = 1
+
+local quant_state = {}
+
+for i = 1,16 do
+  quant_state[i] = {}
+  for x = 1,16 do
+    quant_state[i][x] = {}
+    for y = 1,6 do
+      quant_state[i][x][y] = 0
+    end
+  end
+end
+
+local quant_held = nil
+local quant_selected = 1
+
+local quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
+local quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
+local quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
+
+function step_channel_1()
+  r11 = shift(r11,r1_len, r1_prob_p)
+  r12 = shift(r12,r1_len, r1_prob_t)
+  redraw()
+  grid_draw()
+  if quant_channels == 1 then
+    step(r11,r12, 1,r1_bias_p,r1_bias_t, r1_offset_p,r1_pitch_range,note_dur_1_ms,base_velocity_1,random_velocity_1, quant_tab,1)
+  else
+    step(r11,r12, 1,r1_bias_p,r1_bias_t, r1_offset_p,r1_pitch_range,note_dur_1_ms,base_velocity_1,random_velocity_1, quant_tab_1,1)
+  end
+end
+
+function step_channel_2()
+  r21 = shift(r21,r2_len, r2_prob_p)
+  r22 = shift(r22,r2_len, r2_prob_t)
+  redraw()
+  grid_draw()
+  if quant_channels == 1 then
+    step(r21,r22, 2, r2_bias_p,r2_bias_t, r2_offset_p,r2_pitch_range,note_dur_2_ms,base_velocity_2,random_velocity_2, quant_tab,3)
+  else
+    step(r21,r22, 2, r2_bias_p,r2_bias_t, r2_offset_p,r2_pitch_range,note_dur_2_ms,base_velocity_2,random_velocity_2, quant_tab_2,3)
+  end
+end
+
+function on_pulse()
+  if (r1_rate ~= 0 and tick % r1_rate == 0) and ch1_tog then
+    step_channel_1()
+  end
+  if (r2_rate ~= 0 and tick % r2_rate == 0) and ch2_tog then
+    step_channel_2()
+  end
+  tick = tick + 1
+end
+
 pulse_on.event = function()
+end
+
+function step(r1, r2, id, p_bias, t_bias, off, range, duration, base_velocity, random_velocity, quant, crow_output_n)
+  local chan = midi_chan[id]
+  local now = util.time()
+  if r2[1] > (16 - t_bias) then
+    local raw_note = off + dac(r1,p_bias,range)
+    print("quant_tab " .. dump(quant))
+    local note = quantize(raw_note,quant)
+    local velocity = base_velocity + math.random(random_velocity)
+    print("raw_note: " .. raw_note .. " quant: " .. note)
+    chan[3]:note_on(note,100,chan[2])
+    crow.output[crow_output_n].volts = (note - 48) / 12
+    crow.output[crow_output_n+1].execute()
+
+    local expires = now + (duration / 1000)
+    local insert_point = 1
+    while insert_point <= #note_duration_stacks[id] do
+      if expires < note_duration_stacks[id][insert_point][2] then
+        break
+      end
+      insert_point = insert_point + 1      
+    end
+
+    table.insert(note_duration_stacks[id],insert_point,{note,expires})
+    if insert_point == 1 then
+      pulse_off[id].time = duration / 1000
+      pulse_off[id]:start()
+    end
+  end
 end
 
 function bit_at(reg,step,bias)
@@ -191,19 +345,6 @@ function dac(reg,bias,range)
     return 12*bit_at(reg,1,bias) + 6*bit_at(reg,2,bias) + 3*bit_at(reg,3,bias) + 2*bit_at(reg,4,bias) + bit_at(reg,5,bias)
   else
     return 16*bit_at(reg,1,bias) + 8*bit_at(reg,2,bias) + 4*bit_at(reg,3,bias) + 2*bit_at(reg,4,bias) + bit_at(reg,5,bias)
-  end
-end
-
-function step(r1, r2, id, p_bias, t_bias, off, range, duration, base_velocity, random_velocity, quant)
-  local chan = midi_chan[id]
-  if r2[1] > (16 - t_bias) then
-    local raw_note = off + dac(r1,p_bias,range)
-    local note = quantize(raw_note,quant_tab)
-    local velocity = base_velocity + math.random(random_velocity)
-    print("raw_note: " .. raw_note .. " quant: " .. note)
-    chan[3]:note_on(note,100,chan[2])
-    table.insert(note_duration_stacks[id],1,{note,tick + duration})
-    print(dump(note_duration_stacks))
   end
 end
 
@@ -234,6 +375,8 @@ function draw_reg(r,bias)
 end
 
 local prbsteps = {2,5,11,13}
+local prbsteps_lrg = {1,2,3,5,6,8,10,12}
+local biassteps_lrg = {1,2,4,6,9,12,14,16}
 local biassteps = {2,5,11,15}
 local lensteps = {3,4,5,6,7,8,12,16}
 
@@ -292,58 +435,6 @@ function redraw()
   grid_draw()
 end
 
-function make_quant_tab(state, lower_bound, upper_bound)
-  held_notes = {}
-  for i=0,11 do
-    held_notes[i] = 0
-  end
-  for x=lower_bound,upper_bound do
-    for y = 1,6 do
-      local v = (5 * (7 - y) + x) % 12
-      if state[x][y] > 0 then 
-        held_notes[v] = 1 
-      end
-    end
-  end
-  print(dump(held_notes))
-  quant_tab = {}
-  for i = 0,11 do
-    local delta = 0
-    for j = 0,11 do
-      if held_notes[(i - j) % 12] > 0 then
-        delta = j * -1
-        break
-      elseif held_notes[(i + j) % 12] > 0 then
-        delta = j
-        break
-      end
-    end
-    quant_tab[i] = delta
-  end
-  print(dump(quant_tab))
-  return quant_tab
-end
-
-local quant_state = {}
-
-for i = 1,16 do
-  quant_state[i] = {}
-  for x = 1,16 do
-    quant_state[i][x] = {}
-    for y = 1,6 do
-      quant_state[i][x][y] = 0
-    end
-  end
-end
-
-local quant_held = nil
-local quant_selected = 1
-
-local quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
-local quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
-local quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
-
-
 function grid_draw_quant()
   g:all(0)
   local this_quant = quant_state[quant_selected]
@@ -363,91 +454,62 @@ function grid_draw_normal()
     g:led(i,2,5*bit_at(r12,i,r1_bias_t))
     g:led(i+8,2,5*bit_at(r22,i,r2_bias_t))
 
-    if lensteps[i] < r1_len then
-      g:led(i,3,1)
-    elseif lensteps[i] == r1_len then
+    if clksteps[i] == r1_rate then
       g:led(i,3,3)
     else
       g:led(i,3,0)
     end
-
-    if lensteps[i] < r2_len then 
-      g:led(i+8,3,1)
-    elseif lensteps[i] == r2_len then
+    
+    if clksteps[i] == r2_rate then
       g:led(i+8,3,3)
     else
       g:led(i+8,3,0)
     end
     
-    if clksteps[i] == r1_rate then
+    if biassteps_lrg[i] < r1_bias_t then
+      g:led(i,4,1)
+    elseif biassteps_lrg[i] == r1_bias_t then
       g:led(i,4,3)
     else
       g:led(i,4,0)
     end
-    
-    if clksteps[i] == r2_rate then
+    if biassteps_lrg[i] < r2_bias_t then
+      g:led(i+8,4,1)
+    elseif biassteps_lrg[i] == r2_bias_t then
       g:led(i+8,4,3)
     else
       g:led(i+8,4,0)
     end
     
-    if i <= 4 then
-      if prbsteps[i] < r1_prob_p then
-        g:led(i,5,1)
-      elseif prbsteps[i] == r1_prob_p then
-        g:led(i,5,3)
-      else
-        g:led(i,5,0)
-      end
-      if prbsteps[i] < r1_prob_t then
-        g:led(i,6,1)
-      elseif prbsteps[i] == r1_prob_t then
-        g:led(i,6,3)
-      else
-        g:led(i,6,0)
-      end
-      if prbsteps[i] < r2_prob_p then
-        g:led(i+8,5,1)
-      elseif prbsteps[i] == r2_prob_p then
-        g:led(i+8,5,3)
-      else
-        g:led(i+8,5,0)
-      end
-      if prbsteps[i] < r2_prob_t then
-        g:led(i+8,6,1)
-      elseif prbsteps[i] == r2_prob_t then
-        g:led(i+8,6,3)
-      else
-        g:led(i+8,6,0)
-      end
-    elseif i >= 5 then
-      if (i - 4) == r1_pitch_range then
-        g:led(i,5,3)
-      else
-        g:led(i,5,0)
-      end
-
-      if biassteps[i - 4] < r1_bias_t then
-        g:led(i,6,1)
-      elseif biassteps[i - 4] == r1_bias_t then
-        g:led(i,6,3)
-      else
-        g:led(i,6,0)
-      end    
-      if (i - 4) == r2_pitch_range then
-        g:led(i+8,5,3)
-      else
-        g:led(i+8,5,0)
-      end
-
-      if biassteps[i - 4] < r2_bias_t then
-        g:led(i+8,6,1)
-      elseif biassteps[i - 4] == r2_bias_t then
-        g:led(i+8,6,3)
-      else
-        g:led(i+8,6,0)
-      end    
+    if prbsteps_lrg[i] < r1_prob_p then
+      g:led(i,5,1)
+    elseif prbsteps_lrg[i] == r1_prob_p then
+      g:led(i,5,3)
+    else
+      g:led(i,5,0)
     end
+    if prbsteps_lrg[i] < r2_prob_p then
+      g:led(i+8,5,1)
+    elseif prbsteps_lrg[i] == r2_prob_p then
+      g:led(i+8,5,3)
+    else
+      g:led(i+8,5,0)
+    end
+    
+    if prbsteps_lrg[i] < r1_prob_t then
+      g:led(i,6,1)
+    elseif prbsteps_lrg[i] == r1_prob_t then
+      g:led(i,6,3)
+    else
+      g:led(i,6,0)
+    end
+    if prbsteps_lrg[i] < r2_prob_t then
+      g:led(i+8,6,1)
+    elseif prbsteps_lrg[i] == r2_prob_t then
+      g:led(i+8,6,3)
+    else
+      g:led(i+8,6,0)
+    end    
   end
 end
 
@@ -464,15 +526,41 @@ function grid_draw()
     else
       g:led(x,7,0)
     end
+    if x >= 5 and x <= 8 then
+      if (x - 4) == r1_pitch_range then
+        g:led(x,8,3)
+      else
+        g:led(x,8,0)
+      end
+    end
+    if x >= 13 and x <= 16 then
+      if (x - 12) == r2_pitch_range then
+        g:led(x,8,3)
+      else
+        g:led(x,8,0)
+      end
+    end
   end
-  g:led(1,8,3)
-  g:led(2,8,4)
-  g:led(5,8,3)
-  g:led(6,8,4)
-  g:led(9,8,3)
-  g:led(10,8,4)
-  g:led(13,8,3)
-  g:led(14,8,4)
+  if ch1_tog then
+    g:led(1,8,4)
+  else 
+    g:led(1,8,0)
+  end
+  if ch1_trig then
+    g:led(2,8,4)
+  else
+    g:led(2,8,0)
+  end
+  if ch2_tog then 
+    g:led(9,8,4)
+  else 
+    g:led(9,8,0)
+  end
+  if ch2_trig then
+    g:led(10,8,4)
+  else
+    g:led(10,8,0)
+  end
 
   g:refresh()
 end
@@ -497,7 +585,6 @@ function enc(n,d)
     bpm = bpm + d
     clk:bpm_change(bpm)
   elseif n == 2 and b1_held then
-    print("adjust ch1 bias")
     if r1_bias_t < 16 and d > 0 then
       r1_bias_t = r1_bias_t + 1
     elseif r1_bias_t > 0 and d < 0 then
@@ -506,7 +593,6 @@ function enc(n,d)
   elseif n == 2 then
     r1_offset_p = r1_offset_p + d
   elseif n == 3 and b1_held then
-    print("adjust ch2 bias")
     if r2_bias_t < 16 and d > 0 then 
       r2_bias_t = r2_bias_t + 1
     elseif r2_bias_t > 0 and d < 0 then
@@ -522,44 +608,38 @@ function grid_key_normal(x,y,z)
     print("normal grid event: " .. x .. " " .. y .. " " .. z)
 
     if y == 3 and z == 1 and x <= 8 then
-      r1_len = lensteps[x]
-    elseif y == 3 and z == 1 and x > 8 then
-      r2_len = lensteps[x - 8]
-    elseif y == 4 and z == 1 and x <= 8 then
       if r1_rate == clksteps[x] then r1_rate = 0
       else r1_rate = clksteps[x] end
-    elseif y == 4 and z == 1 and x > 8 then
+    elseif y == 3 and z == 1 and x > 8 then
       if r2_rate == clksteps[x - 8] then r2_rate = 0
       else r2_rate = clksteps[x - 8] end
-    elseif y == 5 and z == 1 and x <= 4 then
-      if r1_prob_p == prbsteps[x] then r1_prob_p = 0
-      else r1_prob_p = prbsteps[x] end
+    elseif y == 4 and z == 1 and x <= 8 then
+      if r1_bias_t == biassteps_lrg[x] then r1_bias_t = 0
+      else r1_bias_t = biassteps_lrg[x] end
+    elseif y == 4 and z == 1 and x > 8 then
+      if r2_bias_t == biassteps_lrg[x - 8] then r2_bias_t = 0
+      else r2_bias_t = biassteps_lrg[x - 8] end
     elseif y == 5 and z == 1 and x <= 8 then
-      if r1_pitch_range == x - 4 then r1_pitch_range = 0
-      else r1_pitch_range = x - 4 end
-    elseif y == 5 and z == 1 and x <= 12 then
-      if r2_prob_p == prbsteps[x - 8] then r2_prob_p = 0
-      else r2_prob_p = prbsteps[x - 8] end
-    elseif y == 5 and z == 1 and x <= 16 then
-      if r2_pitch_range == x - 12 then r2_pitch_range = 0
-      else r2_pitch_range = x - 12 end
-    elseif y == 6 and z == 1 and x <= 4 then
-      if r1_prob_t == prbsteps[x] then r1_prob_t = 0
-      else r1_prob_t = prbsteps[x] end
+      if r1_prob_p == prbsteps_lrg[x] then r1_prob_p = 0
+      else r1_prob_p = prbsteps_lrg[x] end
+    elseif y == 5 and z == 1 and x > 8 then
+      if r2_prob_p == prbsteps_lrg[x - 8] then r2_prob_p = 0
+      else r2_prob_p = prbsteps_lrg[x - 8] end
     elseif y == 6 and z == 1 and x <= 8 then
-      if r1_bias_t == biassteps[x - 4] then r1_bias_t = 0
-      else r1_bias_t = biassteps[x - 4] end
-    elseif y == 6 and z == 1 and x <= 12 then
-      if r2_prob_t == prbsteps[x - 8] then r2_prob_t = 0
-      else r2_prob_t = prbsteps[x - 8] end
-    elseif y == 6 and z == 1 and x <= 16 then
-      if r2_bias_t == biassteps[x - 12] then r2_bias_t = 0
-      else r2_bias_t = biassteps[x - 12] end
+      if r1_prob_t == prbsteps_lrg[x] then r1_prob_t = 0
+      else r1_prob_t = prbsteps_lrg[x] end
+    elseif y == 6 and z == 1 and x > 8 then
+      if r2_prob_t == prbsteps_lrg[x - 8] then r2_prob_t = 0
+      else r2_prob_t = prbsteps_lrg[x - 8] end
+
     elseif y == 7 and z == 1 then
       quant_held = x
       quant_selected = x
+      print("making quant_tab")
       quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
+      print("making quant_tab_1")
       quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
+      print("making quant_tab_2")
       quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
     elseif y == 7 and z == 0 and x == quant_held then
       quant_held = nil
@@ -567,21 +647,39 @@ function grid_key_normal(x,y,z)
     
     if y == 8 and z == 1 then
       if x == 1 then
-        r11[r1_len] = 0
+        ch1_tog = not ch1_tog
+        -- r11[r1_len] = 0
       elseif x == 2 then
-        r11[r1_len] = 1
-      elseif x == 5 then
-        r12[r1_len] = 0
-      elseif x == 6 then
-        r12[r1_len] = 1
+        ch1_trig = true
+        step_channel_1()
+        -- r11[r1_len] = 1
+      elseif x == 3 then
+        r1_len = math.max(1, r1_len - 1)
+      elseif x == 4 then
+        r1_len = math.min(16, r1_len + 1)
+      elseif x <= 8 then
+        if r1_pitch_range == x - 4 then r1_pitch_range = 0
+        else r1_pitch_range = x - 4 end
       elseif x == 9 then
-        r21[r2_len] = 0
+        ch2_tog = not ch2_tog
+        -- r21[r2_len] = 0
       elseif x == 10 then
-        r21[r2_len] = 1
-      elseif x == 13 then
-        r22[r2_len] = 0
-      elseif x == 14 then
-        r22[r2_len] = 1
+        ch2_trig = true
+        step_channel_2()
+        -- r21[r2_len] = 1
+      elseif x == 11 then
+        r2_len = math.max(1, r2_len - 1)
+      elseif x == 12 then
+        r2_len = math.min(16, r2_len + 1)
+      elseif x <= 16 then
+        if r2_pitch_range == x - 12 then r2_pitch_range = 0
+        else r2_pitch_range = x - 12 end
+      end
+    elseif y == 8 and z == 0 then
+      if x == 2 then
+        ch1_trig = false
+      elseif x == 10 then
+        ch2_trig = false
       end
     end
   
@@ -598,8 +696,9 @@ function grid_key_quant(x,y,z)
     end
     print("setting quant_tab to " .. quant_selected)
     quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
-    quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
-    quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
+    -- TODO enable and check that this works
+    -- quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
+    -- quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
   end
   -- if (y == 7) and (z == 1) then
   --   quant_held = x
@@ -644,10 +743,15 @@ function init()
   params:add_number("quant channels", "quant channels",1,2,1)
   params:set_action("quant channels",function(x) quant_channels = x end)
   
-  params:add_number("duration vox 1", "duration vox 1", 1, 100, 4)
+  params:add_number("duration vox 1", "duration vox 1", 0, 100, 4)
   params:set_action("duration vox 1", function (x) note_duration_1 = x end)
-  params:add_number("duration vox 2", "duration vox 2", 1, 100, 4)
+  params:add_number("duration vox 2", "duration vox 2", 0, 100, 4)
   params:set_action("duration vox 2", function (x) note_duration_2 = x end)
+  params:add_number("duration (ms) vox 1", "duration (ms) vox 1", 0, 2000, 0)
+  params:set_action("duration (ms) vox 1", function (x) note_dur_1_ms = x end)
+  params:add_number("duration (ms) vox 2", "duration (ms) vox 2", 0, 2000, 0)
+  params:set_action("duration (ms) vox 2", function (x) note_dur_2_ms = x end)
+
   params:add_number("base velocity vox 1", "base velocity vox 1", 0, 128, 20)
   params:set_action("base velocity vox 1", function (x) base_velocity_1 = x end)
   params:add_number("base velocity vox 2", "base velocity vox 2", 0, 128, 50)
@@ -656,7 +760,7 @@ function init()
   params:set_action("random velocity vox 1", function (x) random_velocity_1 = x end)
   params:add_number("random velocity vox 2", "random velocity vox 2", 0, 128, 30)
   params:set_action("random velocity vox 2", function (x) random_velocity_2 = x end)
-
+  
   midi_setup()
   midi_panic()
   print(dump(m))
@@ -666,4 +770,21 @@ function init()
   end
   clk:add_clock_params()
   clk:start()
+  -- disabled until this is fixed upstream
+  -- crow.input[1].mode('change',1.0,0.1,'rising')
+  -- crow.input[1].change = function(s)
+  --   step_channel_1()
+  -- end
+
+  -- should just step channel 2 here, but clocking both channels instead
+  crow.input[2].mode('change',1.0,0.1,'rising')
+  crow.input[2].change = function(s)
+    step_channel_1()
+    step_channel_2()
+    tick = tick + 1
+    -- on_pulse()
+  end
+  
+  crow.output[2].action = "{to(5,0),to(0,0.25)}"
+  crow.output[4].action = "{to(5,0),to(0,0.25)}"
 end
