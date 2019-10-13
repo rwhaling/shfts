@@ -24,8 +24,9 @@
 -- layout is perfect fourths vertical, chromatic scale horizontal
 -- a nice pentatonic scale:
 --    0 X 0 0 0 0 0 0
+--    0 X 0 X 0 0 0 0
 --    0 X 0 0 X 0 0 0
---    0 X 0 0 0 X 0 0
+--    0 0 0 0 0 0 0 0
 -- row 8 :
 -- -- col 1: 1 start/stop clock
 -- -- col 2: single-step register 
