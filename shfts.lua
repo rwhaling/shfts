@@ -24,9 +24,8 @@
 -- layout is perfect fourths vertical, chromatic scale horizontal
 -- a nice pentatonic scale:
 --    0 X 0 0 0 0 0 0
---    0 X 0 X 0 0 0 0
 --    0 X 0 0 X 0 0 0
---    0 0 0 0 0 0 0 0
+--    0 X 0 0 0 X 0 0
 -- row 8 :
 -- -- col 1: 1 start/stop clock
 -- -- col 2: single-step register 
@@ -57,11 +56,6 @@ local clk = beatclock.new()
 clk.ticks_per_step = 1
 clk.steps_per_beat = 24
 clk:bpm_change(bpm)
--- local clk_midi = midi.connect(1)
--- clk_midi.event = function(data)
---   print("clock got midi " .. dump(data))
---   clk:process_midi(data)
--- end
 
 local midi_chan = {
   {1,6,nil},
@@ -82,16 +76,12 @@ function midi_setup()
   for ch = 1,#midi_chan do
     midi_chan[ch][3] = midi.connect(midi_chan[ch][1])
     if ch == 1 then
-      -- print("enabling midi clock on channel " .. ch)
       midi_chan[ch][3].event = function(data) 
-        -- print("processing midi clock")
         clk:process_midi(data)
       end
     else 
-      -- print("disabling midi clock on channel " .. ch)
       if midi_chan[ch][1] ~= midi_chan[1][1] then
         midi_chan[ch][3].event = function(data) 
-          -- print("ignoring midi clock")
         end
       end
     end
@@ -183,11 +173,8 @@ pulse_off[2].event = function()
   end
 end
 
-local note_dur_1_ms = 0
-local note_dur_2_ms = 0
-
-local note_duration_1 = 16
-local note_duration_2 = 16
+local note_dur_1_ms = 10
+local note_dur_2_ms = 10
 
 local base_velocity_1 = 50
 local random_velocity_1 = 40
@@ -256,8 +243,8 @@ local quant_held = nil
 local quant_selected = 1
 
 local quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
-local quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
-local quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
+local quant_tab_1 = make_quant_tab(quant_state[quant_selected],1,8)
+local quant_tab_2 = make_quant_tab(quant_state[quant_selected],9,16)
 
 function step_channel_1()
   r11 = shift(r11,r1_len, r1_prob_p)
@@ -327,7 +314,6 @@ function step(r1, r2, id, p_bias, t_bias, off, range, duration, base_velocity, r
 end
 
 function bit_at(reg,step,bias)
-  -- print(tostring(reg) .. " " .. tostring(step) .. " " .. tostring(bias))
   if reg[step] > (16 - bias) then
     return 1
   else 
@@ -431,6 +417,9 @@ function redraw()
   screen.move(60,48)
   screen.text(ch2_tog and "RUN" or "STOP")
   screen.text("   BPM " .. bpm)
+  
+  screen.move(0,55)
+  screen.text(quant_desc(quant_state,quant_selected))
 
   screen.update()
   grid_draw()
@@ -639,9 +628,9 @@ function grid_key_normal(x,y,z)
       print("making quant_tab")
       quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
       print("making quant_tab_1")
-      quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
+      quant_tab_1 = make_quant_tab(quant_state[quant_selected],1,8)
       print("making quant_tab_2")
-      quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
+      quant_tab_2 = make_quant_tab(quant_state[quant_selected],9,16)
     elseif y == 7 and z == 0 and x == quant_held then
       quant_held = nil
     end
@@ -697,19 +686,10 @@ function grid_key_quant(x,y,z)
     end
     print("setting quant_tab to " .. quant_selected)
     quant_tab = make_quant_tab(quant_state[quant_selected],1,16)
-    -- TODO enable and check that this works
-    -- quant_tab1 = make_quant_tab(quant_state[quant_selected],1,8)
-    -- quant_tab2 = make_quant_tab(quant_state[quant_selected],9,16)
+
+    quant_tab_1 = make_quant_tab(quant_state[quant_selected],1,8)
+    quant_tab_2 = make_quant_tab(quant_state[quant_selected],9,16)
   end
-  -- if (y == 7) and (z == 1) then
-  --   quant_held = x
-  --   quant_selected = x
-  --   print("setting quant_tab to " .. quant_selected)
-  --   quant_tab = make_quant_tab(quant_state[quant_selected])
-  -- elseif y == 7 and z == 0 and x == quant_held then
-  --     print("setting quant_tab to nil?")
-  --   quant_held = nil
-  -- end
   if y == 7 and z == 0 and x == quant_held then
     quant_held = nil
   end
@@ -721,6 +701,40 @@ function quantize(note,tab)
   return note + delta
 end
 
+local function ends_with(str, ending)
+   return ending == "" or str:sub(-#ending) == ending
+end
+
+function quant_desc(quant,sel)
+  
+  if quant_channels == 1 then
+    notes_on = ""
+    for q = 0,12 do
+      if quant_tab[q] == 0 then
+        notes_on = notes_on .. " " .. q
+      end
+    end
+    if notes_on == " 0 1 2 3 4 5 6 7 8 9 10 11" then notes_on = " OFF" end
+    return "q" .. sel .. notes_on
+  else
+    notes_on_1 = ""
+    for q = 0,12 do
+      if quant_tab_1[q] == 0 then
+        notes_on_1 = notes_on_1 .. " " .. q
+      end
+    end
+    if notes_on_1 == " 0 1 2 3 4 5 6 7 8 9 10 11" then notes_on_1 = " OFF" end
+    notes_on_2 = ""
+    for q = 0,12 do
+      if quant_tab_2[q] == 0 then
+        notes_on_2 = notes_on_2 .. " " .. q
+      end
+    end
+    if ends_with(notes_on_2," 0 1 2 3 4 5 6 7 8 9 10 11") then notes_on_2 = " OFF" end
+    return "q" .. sel .. notes_on_1 .. " : " .. notes_on_2
+  end
+end
+
 function init()
   g = grid.connect(1)
   g.key = function(x,y,z)
@@ -730,6 +744,10 @@ function init()
       grid_key_normal(x,y,z)
     end
     redraw()
+  end
+  load_quant_state = tab.load(norns.state.data .. "quant_1.txt")
+  if load_quant_state then
+    quant_state = load_quant_state
   end
   params:add_number("midi device vox 1", "midi device vox 1", 1,4,1)
   params:set_action("midi device vox 1", function (x) midi_chan[1][1] = x; midi_setup() end)
@@ -744,13 +762,18 @@ function init()
   params:add_number("quant channels", "quant channels",1,2,1)
   params:set_action("quant channels",function(x) quant_channels = x end)
   
+  params:add_trigger("quantizer save", "quantizer save")
+  params:set_action("quantizer save", function() 
+      tab.save(quant_state, norns.state.data .. "quant_1.txt")
+  end)
+
   params:add_number("duration vox 1", "duration vox 1", 0, 100, 4)
   params:set_action("duration vox 1", function (x) note_duration_1 = x end)
   params:add_number("duration vox 2", "duration vox 2", 0, 100, 4)
   params:set_action("duration vox 2", function (x) note_duration_2 = x end)
-  params:add_number("duration (ms) vox 1", "duration (ms) vox 1", 0, 2000, 0)
+  params:add_number("duration (ms) vox 1", "duration (ms) vox 1", 0, 2000, 10)
   params:set_action("duration (ms) vox 1", function (x) note_dur_1_ms = x end)
-  params:add_number("duration (ms) vox 2", "duration (ms) vox 2", 0, 2000, 0)
+  params:add_number("duration (ms) vox 2", "duration (ms) vox 2", 0, 2000, 10)
   params:set_action("duration (ms) vox 2", function (x) note_dur_2_ms = x end)
 
   params:add_number("base velocity vox 1", "base velocity vox 1", 0, 128, 20)
@@ -771,21 +794,17 @@ function init()
   end
   clk:add_clock_params()
   clk:start()
-  -- disabled until this is fixed upstream
-  -- crow.input[1].mode('change',1.0,0.1,'rising')
-  -- crow.input[1].change = function(s)
-  --   step_channel_1()
-  -- end
 
-  -- should just step channel 2 here, but clocking both channels instead
-  crow.input[2].mode('change',1.0,0.1,'rising')
-  crow.input[2].change = function(s)
+  crow.input[1].mode('change',2.0,1.0,'rising')
+  crow.input[1].change = function(s)
     step_channel_1()
+  end
+
+  crow.input[2].mode('change',2.0,1.0,'rising')
+  crow.input[2].change = function(s)
     step_channel_2()
-    tick = tick + 1
-    -- on_pulse()
   end
   
-  crow.output[2].action = "{to(5,0),to(0,0.25)}"
-  crow.output[4].action = "{to(5,0),to(0,0.25)}"
+  crow.output[2].action = "{to(5,0),to(5,0.01),to(0,0)}"
+  crow.output[4].action = "{to(5,0),to(5,0.01),to(0,0)}"
 end
