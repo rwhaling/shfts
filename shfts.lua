@@ -736,6 +736,7 @@ function quant_desc(quant,sel)
 end
 
 function init()
+  local grid = util.file_exists(_path.code.."midigrid") and include "midigrid/lib/mg_128" or grid
   g = grid.connect(1)
   g.key = function(x,y,z)
     if quant_held then
